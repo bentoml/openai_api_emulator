@@ -4,3 +4,4 @@ labels:
   project: gallery
 include:
   - "*.py"
+  - "*.txt"
