@@ -26,7 +26,9 @@ A BentoML-based service that emulates OpenAI's Chat Completion and Models APIs w
 
 - **Customizable Timing Parameters**
   - `X-TTFT-MS`: Time To First Token in milliseconds
-  - `X-ITL-MS`: Inter-Token Latency in milliseconds (applies between each actual token)
+  - `X-ITL-MS`: Inter-Token Latency in milliseconds
+    - **Streaming**: Delay between each actual token
+    - **Non-streaming**: Per-token processing delay (total = ITL × output_length)
   - `X-OUTPUT-LENGTH`: Output length in exact tokens (not approximate)
 
 - **Health Check** (`/health`)
@@ -153,8 +155,12 @@ curl http://localhost:3000/health
 | Header | Description | Default | Example |
 |--------|-------------|---------|---------|
 | `X-TTFT-MS` | Time to first token (ms) | 100 | 200 |
-| `X-ITL-MS` | Inter-token latency between **actual tokens** (ms) | 50 | 75 |
+| `X-ITL-MS` | **Streaming**: delay between tokens<br>**Non-streaming**: per-token processing delay | 50 | 75 |
 | `X-OUTPUT-LENGTH` | Output length in **exact tokens** using tiktoken | 20 | 30 |
+
+**Timing Calculation Examples:**
+- **Streaming** (30 tokens, TTFT=200ms, ITL=75ms): 200ms + (29 × 75ms) = ~2.4s total
+- **Non-streaming** (30 tokens, TTFT=200ms, ITL=75ms): 200ms + (30 × 75ms) = ~2.5s total
 
 ### Available Models
 

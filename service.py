@@ -96,7 +96,7 @@ my_image = bentoml.images.Image(python_version="3.11").requirements_file(
 @bentoml.service(
     image=my_image,
     name="openai_emulator",
-    workers=16,
+    workers="cpu_count",
 )
 class OpenAIEmulator:
     def __init__(self):
@@ -368,6 +368,11 @@ class OpenAIEmulator:
 
                 # Generate non-streaming response
                 content = self._generate_response_content(output_length)
+
+                # Simulate additional processing time based on ITL and output length
+                # For non-streaming, ITL represents the per-token processing delay
+                additional_delay = itl * output_length
+                await asyncio.sleep(additional_delay)
 
                 # Calculate token counts (only output needs to be accurate)
                 prompt_tokens = (
