@@ -1,7 +1,0 @@
-service: "service.py:OpenAIEmulator"
-labels:
-  owner: bentoml-team
-  project: gallery
-include:
-  - "*.py"
-  - "*.txt"

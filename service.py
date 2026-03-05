@@ -4,7 +4,6 @@ import uuid
 from typing import List, Optional, Dict, Any, AsyncGenerator
 import random
 
-import bentoml
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -14,20 +13,18 @@ import tiktoken
 # Pydantic models for request/response
 class ImageUrl(BaseModel):
     url: str
-    detail: Optional[str] = "auto"  # auto, low, high
+    detail: Optional[str] = "auto"
 
 
 class ContentItem(BaseModel):
-    type: str  # "text" or "image_url"
+    type: str
     text: Optional[str] = None
     image_url: Optional[ImageUrl] = None
 
 
 class Message(BaseModel):
     role: str
-    content: Optional[str | List[ContentItem]] = (
-        None  # Support both string and array formats
-    )
+    content: Optional[str | List[ContentItem]] = None
 
 
 class ChatCompletionRequest(BaseModel):
@@ -85,350 +82,236 @@ class ModelsResponse(BaseModel):
     data: List[ModelInfo]
 
 
-app = FastAPI()
+AVAILABLE_MODELS = [
+    "gpt-3.5-turbo",
+    "gpt-3.5-turbo-0301",
+    "gpt-3.5-turbo-0613",
+    "gpt-3.5-turbo-16k",
+    "gpt-4",
+    "gpt-4-0314",
+    "gpt-4-0613",
+    "gpt-4-32k",
+    "text-davinci-003",
+    "text-davinci-002",
+]
 
-my_image = bentoml.images.Image(python_version="3.11").requirements_file(
-    "requirements.txt"
-)
+SAMPLE_RESPONSES = [
+    "Hello! How can I assist you today?",
+    "I'm here to help you with any questions you might have.",
+    "That's an interesting question. Let me think about it.",
+    "I understand what you're asking. Here's my response:",
+    "Thank you for your question. I'd be happy to help.",
+    "Based on the information provided, I can offer the following insights:",
+    "Let me provide you with a comprehensive answer to your query.",
+    "I appreciate you reaching out. Here's what I can tell you:",
+]
+
+FILLER_PHRASES = [
+    "Additionally, I want to mention that",
+    "Furthermore, it's important to note that",
+    "Moreover, we should consider that",
+    "In fact, this reminds me that",
+    "It's worth noting that",
+    "Please also consider that",
+    "Also, I should add that",
+    "On a related note,",
+    "To elaborate further,",
+    "In this context,",
+]
+
+EXTENSION_TEMPLATES = [
+    "this is a very interesting topic that deserves careful consideration",
+    "there are many aspects to explore in this particular area of discussion",
+    "we can approach this from multiple different perspectives and viewpoints",
+    "the implications of this are quite significant and far-reaching in nature",
+    "this subject matter has various nuances that are worth examining closely",
+    "there are several factors that contribute to the overall understanding here",
+    "the complexity of this issue requires thorough analysis and careful thought",
+]
+
+try:
+    encoding = tiktoken.get_encoding("cl100k_base")
+except Exception:
+    encoding = None
 
 
-@bentoml.asgi_app(app)
-@bentoml.service(
-    image=my_image,
-    name="openai_emulator",
-    workers="cpu_count",
-)
-class OpenAIEmulator:
-    def __init__(self):
-        self.available_models = [
-            "gpt-3.5-turbo",
-            "gpt-3.5-turbo-0301",
-            "gpt-3.5-turbo-0613",
-            "gpt-3.5-turbo-16k",
-            "gpt-4",
-            "gpt-4-0314",
-            "gpt-4-0613",
-            "gpt-4-32k",
-            "text-davinci-003",
-            "text-davinci-002",
-        ]
+def _get_timing_params(request: Request) -> tuple[float, float, int, int]:
+    ttft_ms = float(request.headers.get("X-TTFT-MS", 100))
+    itl_ms = float(request.headers.get("X-ITL-MS", 50))
+    output_length = int(request.headers.get("X-OUTPUT-LENGTH", 20))
+    sse_batch_size = int(request.headers.get("X-SSE-BATCH-SIZE", 4))
+    return ttft_ms / 1000.0, itl_ms / 1000.0, output_length, sse_batch_size
 
-        # Sample response templates
-        self.sample_responses = [
-            "Hello! How can I assist you today?",
-            "I'm here to help you with any questions you might have.",
-            "That's an interesting question. Let me think about it.",
-            "I understand what you're asking. Here's my response:",
-            "Thank you for your question. I'd be happy to help.",
-            "Based on the information provided, I can offer the following insights:",
-            "Let me provide you with a comprehensive answer to your query.",
-            "I appreciate you reaching out. Here's what I can tell you:",
-        ]
 
-        # Initialize tiktoken encoder for GPT models
-        try:
-            self.encoding = tiktoken.get_encoding(
-                "cl100k_base"
-            )  # Used by GPT-3.5 and GPT-4
-        except Exception:
-            # Fallback if tiktoken fails to initialize
-            self.encoding = None
+def _count_tokens(text: str) -> int:
+    if encoding is None:
+        return len(text) // 4
+    try:
+        return len(encoding.encode(text))
+    except Exception:
+        return len(text) // 4
 
-    def _get_timing_params(self, request: Request) -> tuple[float, float, int, int]:
-        """Extract timing parameters from headers"""
-        ttft_ms = float(request.headers.get("X-TTFT-MS", 100))  # Default 100ms
-        itl_ms = float(request.headers.get("X-ITL-MS", 50))  # Default 50ms
-        output_length = int(
-            request.headers.get("X-OUTPUT-LENGTH", 20)
-        )  # Default 20 tokens
-        sse_batch_size = int(request.headers.get("X-SSE-BATCH-SIZE", 4))  # Default 4 tokens per chunk
 
-        return ttft_ms / 1000.0, itl_ms / 1000.0, output_length, sse_batch_size
+def _generate_response_content(target_tokens: int) -> str:
+    base_response = random.choice(SAMPLE_RESPONSES)
+    current_content = base_response
 
-    def _count_tokens(self, text: str) -> int:
-        """Count tokens in text using tiktoken"""
-        if self.encoding is None:
-            # Fallback to character-based estimation
-            return len(text) // 4
-
-        try:
-            return len(self.encoding.encode(text))
-        except Exception:
-            # Fallback if tiktoken encoding fails
-            return len(text) // 4
-
-    def _generate_response_content(self, target_tokens: int) -> str:
-        """Generate response content with exact token count using tiktoken"""
-
-        # Start with a base response
-        base_response = random.choice(self.sample_responses)
-        current_content = base_response
-
-        # If we already have enough tokens, truncate
-        current_tokens = self._count_tokens(current_content)
-        if current_tokens >= target_tokens:
-            # Truncate by encoding and decoding exact number of tokens
-            if self.encoding is not None:
-                try:
-                    encoded = self.encoding.encode(current_content)
-                    truncated = encoded[:target_tokens]
-                    return self.encoding.decode(truncated)
-                except Exception:
-                    pass
-
-            # Fallback: truncate by words
-            words = current_content.split()
-            estimated_words = max(1, target_tokens // 1.3)
-            return " ".join(words[: int(estimated_words)])
-
-        # Extend content to reach target tokens
-        filler_phrases = [
-            "Additionally, I want to mention that",
-            "Furthermore, it's important to note that",
-            "Moreover, we should consider that",
-            "In fact, this reminds me that",
-            "It's worth noting that",
-            "Please also consider that",
-            "Also, I should add that",
-            "On a related note,",
-            "To elaborate further,",
-            "In this context,",
-        ]
-
-        extension_templates = [
-            "this is a very interesting topic that deserves careful consideration",
-            "there are many aspects to explore in this particular area of discussion",
-            "we can approach this from multiple different perspectives and viewpoints",
-            "the implications of this are quite significant and far-reaching in nature",
-            "this subject matter has various nuances that are worth examining closely",
-            "there are several factors that contribute to the overall understanding here",
-            "the complexity of this issue requires thorough analysis and careful thought",
-        ]
-
-        while current_tokens < target_tokens:
-            # Add a filler phrase
-            filler = random.choice(filler_phrases)
-            extension = random.choice(extension_templates)
-            addition = f" {filler} {extension}."
-
-            # Check if adding this would exceed target
-            addition_tokens = self._count_tokens(addition)
-            if current_tokens + addition_tokens <= target_tokens:
-                current_content += addition
-                current_tokens += addition_tokens
-            else:
-                # Add partial content to reach exact target
-                remaining_tokens = target_tokens - current_tokens
-                if remaining_tokens > 0:
-                    if self.encoding is not None:
-                        try:
-                            # Encode the addition and take only what we need
-                            encoded_addition = self.encoding.encode(addition)
-                            truncated_addition = encoded_addition[:remaining_tokens]
-                            partial_addition = self.encoding.decode(truncated_addition)
-                            current_content += partial_addition
-                        except Exception:
-                            # Fallback: add a simple word
-                            current_content += " more"
-                    else:
-                        # Fallback: add a simple word
-                        current_content += " more"
-                break
-
-        return current_content.strip()
-
-    async def _stream_response(
-        self,
-        request_data: ChatCompletionRequest,
-        ttft: float,
-        itl: float,
-        output_length: int,
-        sse_batch_size: int,
-    ) -> AsyncGenerator[str, None]:
-        """Generate streaming response chunks"""
-        request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
-        created = int(time.time())
-
-        # Wait for TTFT before first token
-        await asyncio.sleep(ttft)
-
-        # Generate content
-        content = self._generate_response_content(output_length)
-        words = content.split()
-
-        # First chunk with role
-        first_chunk = ChatCompletionStreamResponse(
-            id=request_id,
-            created=created,
-            model=request_data.model,
-            choices=[
-                DeltaChoice(
-                    index=0,
-                    delta={"role": "assistant", "content": ""},
-                    finish_reason=None,
-                )
-            ],
-        )
-        yield f"data: {first_chunk.model_dump_json()}\n\n"
-
-        # Stream tokens (using tiktoken for more accurate tokenization)
-        if self.encoding is not None:
+    current_tokens = _count_tokens(current_content)
+    if current_tokens >= target_tokens:
+        if encoding is not None:
             try:
-                # Encode content to get actual tokens
-                tokens = self.encoding.encode(content)
-
-                # Stream tokens in batches (automatically handles partial last batch)
-                for i in range(0, len(tokens), sse_batch_size):
-                    if i > 0:  # Wait ITL between batches (except first)
-                        await asyncio.sleep(itl)
-
-                    # Get batch of tokens (slice handles partial batches automatically)
-                    token_batch = tokens[i:i + sse_batch_size]
-                    # Decode batch to text
-                    batch_text = self.encoding.decode(token_batch)
-
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        created=created,
-                        model=request_data.model,
-                        choices=[
-                            DeltaChoice(
-                                index=0,
-                                delta={"content": batch_text},
-                                finish_reason=None,
-                            )
-                        ],
-                    )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+                encoded = encoding.encode(current_content)
+                return encoding.decode(encoded[:target_tokens])
             except Exception:
-                # Fallback to word-based streaming in batches
-                words = content.split()
-                for i in range(0, len(words), sse_batch_size):
-                    if i > 0:
-                        await asyncio.sleep(itl)
+                pass
+        words = current_content.split()
+        return " ".join(words[: max(1, int(target_tokens // 1.3))])
 
-                    # Get batch of words
-                    word_batch = words[i:i + sse_batch_size]
-                    batch_text = " ".join(word_batch) + " "
+    while current_tokens < target_tokens:
+        filler = random.choice(FILLER_PHRASES)
+        extension = random.choice(EXTENSION_TEMPLATES)
+        addition = f" {filler} {extension}."
+        addition_tokens = _count_tokens(addition)
 
-                    chunk = ChatCompletionStreamResponse(
-                        id=request_id,
-                        created=created,
-                        model=request_data.model,
-                        choices=[
-                            DeltaChoice(
-                                index=0,
-                                delta={"content": batch_text},
-                                finish_reason=None,
-                            )
-                        ],
-                    )
-                    yield f"data: {chunk.model_dump_json()}\n\n"
+        if current_tokens + addition_tokens <= target_tokens:
+            current_content += addition
+            current_tokens += addition_tokens
         else:
-            # Fallback to word-based streaming in batches
-            words = content.split()
-            for i in range(0, len(words), sse_batch_size):
+            remaining = target_tokens - current_tokens
+            if remaining > 0 and encoding is not None:
+                try:
+                    encoded_addition = encoding.encode(addition)
+                    partial = encoding.decode(encoded_addition[:remaining])
+                    current_content += partial
+                except Exception:
+                    current_content += " more"
+            else:
+                current_content += " more"
+            break
+
+    return current_content.strip()
+
+
+async def _stream_response(
+    request_data: ChatCompletionRequest,
+    ttft: float,
+    itl: float,
+    output_length: int,
+    sse_batch_size: int,
+) -> AsyncGenerator[str, None]:
+    request_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    created = int(time.time())
+
+    await asyncio.sleep(ttft)
+
+    content = _generate_response_content(output_length)
+
+    first_chunk = ChatCompletionStreamResponse(
+        id=request_id,
+        created=created,
+        model=request_data.model,
+        choices=[DeltaChoice(index=0, delta={"role": "assistant", "content": ""}, finish_reason=None)],
+    )
+    yield f"data: {first_chunk.model_dump_json()}\n\n"
+
+    if encoding is not None:
+        try:
+            tokens = encoding.encode(content)
+            for i in range(0, len(tokens), sse_batch_size):
                 if i > 0:
                     await asyncio.sleep(itl)
-
-                # Get batch of words
-                word_batch = words[i:i + sse_batch_size]
-                batch_text = " ".join(word_batch) + " "
-
+                batch_text = encoding.decode(tokens[i : i + sse_batch_size])
                 chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     created=created,
                     model=request_data.model,
-                    choices=[
-                        DeltaChoice(
-                            index=0, delta={"content": batch_text}, finish_reason=None
-                        )
-                    ],
+                    choices=[DeltaChoice(index=0, delta={"content": batch_text}, finish_reason=None)],
                 )
                 yield f"data: {chunk.model_dump_json()}\n\n"
-
-        # Final chunk
-        final_chunk = ChatCompletionStreamResponse(
-            id=request_id,
-            created=created,
-            model=request_data.model,
-            choices=[DeltaChoice(index=0, delta={}, finish_reason="stop")],
-        )
-        yield f"data: {final_chunk.model_dump_json()}\n\n"
-        yield "data: [DONE]\n\n"
-
-    @app.post("/v1/chat/completions")
-    async def chat_completions(self, request: Request):
-        try:
-            # Parse request
-            body = await request.json()
-            request_data = ChatCompletionRequest(**body)
-
-            # Get timing parameters from headers
-            ttft, itl, output_length, sse_batch_size = self._get_timing_params(request)
-
-            if request_data.stream:
-                # Return streaming response
-                return StreamingResponse(
-                    self._stream_response(request_data, ttft, itl, output_length, sse_batch_size),
-                    media_type="text/plain",
-                    headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
-                )
-            else:
-                # Wait for TTFT before responding
-                await asyncio.sleep(ttft)
-
-                # Generate non-streaming response
-                content = self._generate_response_content(output_length)
-
-                # Simulate additional processing time based on ITL and output length
-                # For non-streaming, ITL represents the per-token processing delay
-                additional_delay = itl * output_length
-                await asyncio.sleep(additional_delay)
-
-                # Calculate token counts (only output needs to be accurate)
-                prompt_tokens = (
-                    len(str(request_data.messages)) // 4
-                )  # Simple estimate for input
-                completion_tokens = self._count_tokens(content)  # Accurate for output
-                total_tokens = prompt_tokens + completion_tokens
-
-                response = ChatCompletionResponse(
-                    id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
-                    created=int(time.time()),
+        except Exception:
+            words = content.split()
+            for i in range(0, len(words), sse_batch_size):
+                if i > 0:
+                    await asyncio.sleep(itl)
+                batch_text = " ".join(words[i : i + sse_batch_size]) + " "
+                chunk = ChatCompletionStreamResponse(
+                    id=request_id,
+                    created=created,
                     model=request_data.model,
-                    choices=[
-                        Choice(
-                            index=0,
-                            message=Message(role="assistant", content=content),
-                            finish_reason="stop",
-                        )
-                    ],
-                    usage=Usage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=total_tokens,
-                    ),
+                    choices=[DeltaChoice(index=0, delta={"content": batch_text}, finish_reason=None)],
                 )
+                yield f"data: {chunk.model_dump_json()}\n\n"
+    else:
+        words = content.split()
+        for i in range(0, len(words), sse_batch_size):
+            if i > 0:
+                await asyncio.sleep(itl)
+            batch_text = " ".join(words[i : i + sse_batch_size]) + " "
+            chunk = ChatCompletionStreamResponse(
+                id=request_id,
+                created=created,
+                model=request_data.model,
+                choices=[DeltaChoice(index=0, delta={"content": batch_text}, finish_reason=None)],
+            )
+            yield f"data: {chunk.model_dump_json()}\n\n"
 
-                return response.model_dump()
+    final_chunk = ChatCompletionStreamResponse(
+        id=request_id,
+        created=created,
+        model=request_data.model,
+        choices=[DeltaChoice(index=0, delta={}, finish_reason="stop")],
+    )
+    yield f"data: {final_chunk.model_dump_json()}\n\n"
+    yield "data: [DONE]\n\n"
 
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=str(e))
 
-    @app.get("/v1/models")
-    async def models(self):
-        """Return available models"""
-        model_list = []
-        for model_id in self.available_models:
-            model_list.append(
-                ModelInfo(id=model_id, created=int(time.time()), owned_by="openai")
+app = FastAPI(title="OpenAI Emulator")
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    try:
+        body = await request.json()
+        request_data = ChatCompletionRequest(**body)
+        ttft, itl, output_length, sse_batch_size = _get_timing_params(request)
+
+        if request_data.stream:
+            return StreamingResponse(
+                _stream_response(request_data, ttft, itl, output_length, sse_batch_size),
+                media_type="text/plain",
+                headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
             )
 
-        response = ModelsResponse(data=model_list)
+        await asyncio.sleep(ttft)
+        content = _generate_response_content(output_length)
+        await asyncio.sleep(itl * output_length)
+
+        prompt_tokens = len(str(request_data.messages)) // 4
+        completion_tokens = _count_tokens(content)
+
+        response = ChatCompletionResponse(
+            id=f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            created=int(time.time()),
+            model=request_data.model,
+            choices=[Choice(index=0, message=Message(role="assistant", content=content), finish_reason="stop")],
+            usage=Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+            ),
+        )
         return response.model_dump()
 
-    @app.get("/health")
-    async def health_check(self):
-        """Health check endpoint"""
-        return {"status": "healthy", "timestamp": int(time.time())}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/v1/models")
+async def models():
+    data = [ModelInfo(id=m, created=int(time.time()), owned_by="openai") for m in AVAILABLE_MODELS]
+    return ModelsResponse(data=data).model_dump()
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "timestamp": int(time.time())}

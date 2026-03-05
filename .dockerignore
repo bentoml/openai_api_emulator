@@ -1,0 +1,11 @@
+.venv
+__pycache__
+*.pyc
+*.pyo
+.git
+.gitignore
+README.md
+locustfile.py
+test_*.py
+bentofile.yaml
+requirements.txt

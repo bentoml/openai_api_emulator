@@ -1,6 +1,0 @@
-bentoml
-fastapi
-uvicorn
-pydantic
-asyncio
-tiktoken
