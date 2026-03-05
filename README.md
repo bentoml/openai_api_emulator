@@ -2,6 +2,9 @@
 
 A BentoML-based service that emulates OpenAI's Chat Completion and Models APIs with customizable timing parameters.
 
+
+image id(docker hub): `bjiang00/openai-emulator`
+
 ## Features
 
 - **Chat Completions API** (`/v1/chat/completions`)
